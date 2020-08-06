@@ -1,0 +1,176 @@
+--- 
+- 
+  hosts: all
+  ignore_errors: true
+  name: "setting yum for all the os"
+  tasks: 
+    - 
+      file: 
+        mode: "0755"
+        path: /dvd
+        state: directory
+      name: "Repo mount_folder creation"
+    - 
+      mount: 
+        fstype: iso9660
+        opts: "ro,loop"
+        path: /dvd/
+        src: /dev/cdrom
+        state: mounted
+      name: mount_dvd
+    - 
+      name: yum_repo_BaseOS
+      yum_repository: 
+        baseurl: "file:///dvd/BaseOS"
+        description: Local_baseos
+        file: dvd1
+        gpgcheck: false
+        name: BaseOS
+    - 
+      name: yum_repo_AppStream
+      yum_repository: 
+        baseurl: "file:///dvd/AppStream"
+        description: Local_appstream
+        file: dvd2
+        gpgcheck: false
+        name: AppStream
+- 
+  become: true
+  hosts: all
+  tasks: 
+    - 
+      command: "swapoff -a"
+      name: "swap off"
+    - 
+      name: "Stop and disable firewalld."
+      service: 
+        enabled: false
+        name: firewalld
+        state: stopped
+    - 
+      name: Docker
+      yum_repository: 
+        baseurl: "https://download.docker.com/linux/centos/7/x86_64/stable/"
+        description: "docker YUM repo"
+        gpgcheck: false
+        name: docker
+    - 
+      package: 
+        name: docker-ce-18.09.1-3.el7.x86_64
+        state: present
+    - 
+      name: "Install Docker Module for Python"
+      pip: 
+        name: docker-py
+    - 
+      service: 
+        name: docker
+        state: started
+    - 
+      name: "ensure net.bridge.bridge-nf-call-ip6tables is set to 1"
+      sysctl: 
+        name: net.bridge.bridge-nf-call-ip6tables
+        state: present
+        value: 1
+    - 
+      name: "ensure net.bridge.bridge-nf-call-iptables is set to 1"
+      sysctl: 
+        name: net.bridge.bridge-nf-call-iptables
+        state: present
+        value: 1
+    - 
+      name: "add Kubernetes' YUM repository"
+      yum_repository: 
+        baseurl: "https://packages.cloud.google.com/yum/repos/kubernetes-el7-x86_64"
+        description: "Kubernetes YUM repository"
+        gpgcheck: true
+        gpgkey: "https://packages.cloud.google.com/yum/doc/yum-key.gpg https://packages.cloud.google.com/yum/doc/rpm-package-key.gpg"
+        name: Kubernetes
+    - 
+      name: "install kubelet"
+      yum: 
+        name: kubelet-1.14.0
+        state: present
+        update_cache: true
+    - 
+      name: "install kubeadm"
+      yum: 
+        name: kubeadm-1.14.0
+        state: present
+    - 
+      name: "start kubelet"
+      service: 
+        enabled: true
+        name: kubelet
+        state: started
+- 
+  become: true
+  hosts: master
+  tasks: 
+    - 
+      copy: 
+        dest: /etc/docker/daemon.json
+        src: daemon.json
+      name: "copy daemon file"
+    - 
+      become: true
+      name: "Restart Docker service"
+      service: 
+        enabled: true
+        name: docker
+        state: restarted
+    - 
+      args: 
+        chdir: $HOME
+        creates: cluster_initialized.txt
+      name: "initialize the cluster"
+      shell: "kubeadm init --pod-network-cidr=10.244.0.0/16"
+    - 
+      become: true
+      become_user: root
+      file: 
+        mode: 493
+        path: $HOME/.kube
+        state: directory
+      name: "create .kube directory"
+    - 
+      copy: 
+        dest: /root/.kube/config
+        owner: root
+        remote_src: true
+        src: /etc/kubernetes/admin.conf
+      name: "copy admin.conf to user's kube config"
+    - 
+      args: 
+        chdir: $HOME
+      become: true
+      become_user: root
+      ignore_errors: true
+      name: "install Pod network"
+      shell: "kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/a70459be0084506e4ec919aa1c114638878db11b/Documentation/kube-flannel.yml"
+- 
+  become: true
+  gather_facts: false
+  hosts: master
+  tasks: 
+    - 
+      name: "get join command"
+      register: join_command_raw
+      shell: "kubeadm token create --print-join-command"
+    - 
+      local_action: copy content="{{ join_command_raw.stdout_lines[0] }}" dest="./join-command"
+      name: "set join command"
+
+- 
+  become: true
+  hosts: managed_machine
+  tasks: 
+    - 
+      copy: 
+        src: join-command
+        dest: /root/join-command.sh
+        mode: "0777"
+      name: "create join-command file"
+    - 
+      name: "join cluster"
+      shell: "sh /root/join-command.sh"
